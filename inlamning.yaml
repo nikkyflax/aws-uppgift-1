@@ -1,0 +1,212 @@
+---
+#Parameters for Resource creations
+Parameters:
+  ImageId: #ImageID parameter
+    Type: String #Type of parameter
+    Description: 'Linux 2 AMI for Ireland eu-west1 Region'
+    Default: 'ami-0c1bc246476a5572b' #ID of the AMI 
+  InstanceType: #InstanceType parameter
+    Type: String #Type of parameter
+    Description: Choosing t2 micro because it is free
+    Default: t2.micro #Type of Instance
+  Key1: #Key pair Parameter 
+    Description: SSH Keypair to login to the instance
+    Type: AWS::EC2::KeyPair::KeyName #Type of parameter
+    Default: key1 #Name of the Key pair
+  Snet1: #SubnetID parameter
+    Description: Subnet1 ID
+    Type: String #Type of parameter
+    Default: subnet-00a52f2365b335e45 #SubnetID
+  Snet2: #SubnetID parameter
+    Description: Subnet1 ID
+    Type: String #Type of parameter
+    Default: subnet-06214732dec4ac159	#SubnetID
+  Snet3: #SubnetID parameter
+    Description: Subnet1 ID
+    Type: String #Type of parameter
+    Default: subnet-0a59b2fb9b98b7bc7 #SubnetID
+  VPCID: #VPCID parameter
+    Description: VPC ID
+    Type: String #Type of parameter
+    Default: vpc-0e255d330e11af1f4 #VPCID
+
+
+#Resource creations  
+AWSTemplateFormatVersion: 2010-09-09
+Resources: 
+  #Creates a Launch Template to be used by an auto scaling group
+  LaunchTemplateNiklas: 
+    Type: 'AWS::EC2::LaunchTemplate' #Type of Resource
+    Properties: 
+      LaunchTemplateName: !Sub '${AWS::StackName}-launch-template-for-auto-scaling' #The name of the Launch Template, it will take the stackname and add "-launch-template-for-auto-scaling"
+      LaunchTemplateData: 
+        SecurityGroupIds: #Specifys the Security Groups the Launch Template will use
+          - !GetAtt HTTPSecGroup.GroupId #Gets the ID of from the HTTPSecGroup
+          - !GetAtt SSHSecGroup.GroupId #Gets the ID of from the SSHSecGroup
+        ImageId: !Ref ImageId # Refers to and uses the ImageID parameter
+        InstanceType: !Ref InstanceType #Refers to and uses the InstanceType parameter
+        KeyName: !Ref Key1 #Refers to and uses the Key pair parameter
+        UserData: #adds commands to be run at the creation of Instances created from this template
+          Fn::Base64: 
+            !Sub |
+              #!/bin/bash
+              yum update -y
+              amazon-linux-extras install nginx1 -y
+              systemctl start nginx
+              systemctl enable nginx
+              echo This is a webapplication created by NIKLAS ANDERSSON from $(hostname -f) > /usr/share/nginx/html/index.html
+
+#Creates a Security Group which will be used by the created EC2 instances and set to only allow ingress traffic from the HTTPSecGroupFrontend Security Group
+  HTTPSecGroup:
+    Type: 'AWS::EC2::SecurityGroup' #Type of Resource
+    Properties:
+      GroupDescription: SG to allow HTTP access via port 80
+      #Sets rules for the security group to only allow ingress traffic on port 80 from the HTTPSecGroupFrontend Security Group
+      SecurityGroupIngress:
+        IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        SourceSecurityGroupName: !Ref HTTPSecGroupFrontend
+
+#Creates a Security Group which allow ingress traffic on port 80 from everywhere
+  HTTPSecGroupFrontend:
+    Type: 'AWS::EC2::SecurityGroup' #Type of Resource
+    Properties:
+      GroupDescription: SG to allow HTTP access via port 80 on LB
+      #Sets rules for the security group to only allow ingress traffic on port 80 from everywhere
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0    
+          
+#Creates a Security Group which allow ingress traffic on port 22 from everywhere
+  SSHSecGroup:
+    Type: 'AWS::EC2::SecurityGroup' #Type of Resource
+    Properties:
+      GroupDescription: SG to allow SSH access via port 22
+      #Sets rules for the security group to only allow ingress traffic on port 22 from everywhere
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: '0.0.0.0/0'
+
+#Creates an Autoscaling group that will create EC2 Instances from the previously created Launch Template          
+  AutoscalingGroup1:
+    Type: AWS::AutoScaling::AutoScalingGroup #Type of Resource
+    Properties:
+      #Specifys the ASG to use the previously created Launch Template
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplateNiklas
+        Version: !GetAtt LaunchTemplateNiklas.LatestVersionNumber
+      #Specifys the ASG to use TargetGroup1
+      TargetGroupARNs: 
+        - !Ref TargetGroup1 
+      #sets min/max number of instances to be spun up/down when required and the desired number of instances
+      MaxSize: '3'
+      MinSize: '1'
+      DesiredCapacity: '1'
+      #Specifys the subnets where the ASG should be available
+      VPCZoneIdentifier:   
+        - !Ref Snet1
+        - !Ref Snet2
+        - !Ref Snet3
+      MetricsCollection: 
+        - Granularity: "1Minute"
+          Metrics: 
+            - "GroupMinSize"
+            - "GroupMaxSize"
+  #Creates a Scale up policy for the ASG which tells the ASG to scale up 1 EC2 instance
+  minScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy #Type of Resource
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName:
+        Ref: AutoscalingGroup1
+      Cooldown: '60'
+      ScalingAdjustment: '1'
+
+#Creates a Scale down policy for the ASG which tells the ASG to scale down 1 EC2 instance
+  minScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy #Type of Resource
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName:
+        Ref: AutoscalingGroup1
+      Cooldown: '60'
+      ScalingAdjustment: "-1"
+  
+#Creates a CPU alarm to notify the ASG scale up policy if CPU utilazation is over 80% for longer than 5 minutes which will result in ASG creating more EC2 Instances
+  CPUAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scale-up if CPU > 80% for 5 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '1'
+      Threshold: '80'
+      AlarmActions:
+      - Ref: minScaleUpPolicy
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value:
+          Ref: AutoscalingGroup1
+      ComparisonOperator: GreaterThanThreshold
+  
+#Creates a CPU alarm to notify the ASG scale down policy if CPU utilazation is lower than 70% for longer than 5 minutes which will result in ASG terminating EC2 Instances that are no longer required
+  CPUAlarmLow:
+    Type: AWS::CloudWatch::Alarm #Type of Resource
+    Properties:
+      AlarmDescription: Scale-down if CPU < 70% for 5 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '1'
+      Threshold: '70'
+      AlarmActions:
+      - Ref: minScaleDownPolicy
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value:
+          Ref: AutoscalingGroup1
+      ComparisonOperator: LessThanThreshold
+ 
+#Creates a Load Balancer to be used as the entrypoint for the EC2 instance/instances
+  LoadBalancer1:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer #Type of Resource
+    Properties: 
+      IpAddressType: ipv4
+      Name: LB1
+      SecurityGroups: 
+        - !GetAtt HTTPSecGroupFrontend.GroupId
+      Subnets: 
+        - !Ref Snet1
+        - !Ref Snet2
+        - !Ref Snet3
+      Type: application
+      Scheme: internet-facing 
+  
+#Creates a TargetGroup to be used to communicate between the load balancer and the ASG which allows ingress traffic to know where to find the EC2 instances and what port to go to  
+  TargetGroup1:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup #Type of Resource
+    Properties:
+      IpAddressType: ipv4
+      Name: TG1
+      Protocol: HTTP
+      Port: 80
+      VpcId: !Ref VPCID
+
+#Creates a Listener which forwards all ingress traffic on port 80 on the Load Balancer to the Target Group
+  Listener1:
+    Type: AWS::ElasticLoadBalancingV2::Listener #Type of Resource
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup1
+      LoadBalancerArn: !Ref LoadBalancer1
+      Port: 80
+      Protocol: HTTP
